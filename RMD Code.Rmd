@@ -1,0 +1,839 @@
+---
+title: "PROJECT - IST 707 - Melbourne Housing Market"
+author: "Tushar Mundodu"
+date: "December 17, 2018"
+output:
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+knitr::opts_chunk$set(warning = FALSE, message = F,echo = TRUE)
+```
+
+
+```{r cars, echo=FALSE, message=FALSE}
+library(dplyr)
+library(tidyverse)
+library(Hmisc) 
+library(data.table)
+library(stats)
+library(kernlab)
+library(datasets)
+library(sqldf)
+library(gridExtra)
+library(arules)
+library(arulesViz)
+library(GGally)
+library(DT)
+library(leaflet)
+library(lubridate)
+library(caret)
+library(klaR)
+library(xgboost)
+library(plotrix)
+library(e1071)
+library(klaR)
+library(pROC)
+library(class)
+library(wordcloud)
+library(ggplot2)
+library(ISLR)
+library(corrplot)
+library(ROSE)
+library(ROCR)
+library(randomForest)
+library(rpart)
+library(rpart.plot)
+library(rattle)
+library(factoextra)
+
+memory.limit(size=25000)
+```
+
+
+
+#Importing dataset from Kaggle
+
+Link: https://www.kaggle.com/anthonypino/melbourne-housing-market
+
+```{r}
+mel<- read.csv("C:/Users/Tushar/Desktop/Courses/3rd SEM/IST 707/Project/MHP.csv",header = T, stringsAsFactors = FALSE)
+summary(mel)
+df_mel<- data.frame(mel)
+head(df_mel,2)
+```
+
+
+
+
+
+#Data Pre-processing
+
+Checking for data incompleteness,
+```{r}
+s1<-sum(!complete.cases(df_mel))
+print(paste0("Missing values before imputation : ",s1))
+```
+
+
+Imputing missing values using Bootstrapping and RMM (HMisc):
+Hmisc is a multiple purpose package useful for data analysis, high - level graphics, imputing missing values, advanced table making, model fitting & diagnostics (linear regression, logistic regression & cox regression) etc. Amidst, the wide range of functions contained in this package, it offers 2 powerful functions for imputing missing values.
+
+aregImpute() allows mean imputation using additive regression, bootstrapping, and predictive mean matching.
+
+In bootstrapping, different bootstrap resamples are used for each of multiple imputations. Then, a flexible additive model (non parametric regression method) is fitted on samples taken with replacements from original data and missing values (acts as dependent variable) are predicted using non-missing values (independent variable).
+
+Then, it uses predictive mean matching (default) to impute missing values. Predictive mean matching works well for continuous and categorical (binary & multi-level) without the need for computing residuals and maximum likelihood fit.
+
+```{r}
+impute_arg <- aregImpute(~ Rooms + Bedrooms + Bathrooms + Carspots  + Landsize + Building_Area + Year_Built + Lattitude + Longtitude, data = df_mel, n.impute = 5, nk=0,tlinear = F,B=75)
+impute_arg
+
+```
+
+Appending imputed values
+```{r}
+imputed <-impute.transcan(impute_arg, data=df_mel, imputation=1, list.out=TRUE, pr=FALSE, check=FALSE)
+melb <- as.data.frame(do.call(cbind,imputed))
+```
+
+
+Cross-checking for missing values on final data frame
+```{r}
+mhp_1 <- cbind.data.frame(df_mel$Suburb,melb$Rooms,melb$Bedrooms,df_mel$Type,df_mel$Method,df_mel$Agent,df_mel$Date_Sold,df_mel$Distance,df_mel$Postal_Code,melb$Bathrooms,melb$Carspots,melb$Landsize,melb$Building_Area,melb$Year_Built,df_mel$Govt_City_Council_Area,df_mel$Metropolitan_Region,df_mel$Property_Count,melb$Lattitude,melb$Longtitude,df_mel$Price)
+
+colnames(mhp_1)<-c("Suburb","Rooms","Bedrooms","Type","Method","Agent","Date_Sold","Distance","Postal_Code","Bathrooms","Carspots","Landsize","Building_Area","Year_Built","Govt_City_Council_Area","Metropolitan_Region","Property_Count","Lattitude","Longitude","Price")
+#View(mhp_1)
+
+s2<-sum(!complete.cases(mhp_1))
+print(paste0("Missing values after imputation : ",s2))
+```
+
+
+Correlation between dependent variables;
+```{r}
+cor_data<- as.data.frame(mhp_1[,c(2,3,8,10:14,17,20)])
+str(cor_data)
+cor_data$Distance<- as.numeric(cor_data$Distance)
+cor_data$Property_Count<- as.numeric(cor_data$Property_Count)
+corrplot(cor(as.matrix(cor_data)), method = "pie", type="lower")
+```
+
+*Bedrooms are highly correlated with rooms and bathrooms, so they are not considered for the furhter analysis. Adding bedrooms would give a biased result in most modelling.
+Also, Postal code/zipcode is not a numerical, but a categorical discrete variable.*
+
+
+Final data frame, and data frame for modelling
+```{r}
+mhp_df<- as.data.frame(mhp_1[,-c(3)])
+mhp_mod<- as.data.frame(mhp_df)
+head(mhp_mod,10)
+```
+
+
+
+#About the data:
+
+The dataset contains 27,243 observations with 19 useful variables.
+Target variable: *Price (NUMERICAL, CATEGORICAL (High=1,Low=0))*
+```{r}
+ggplot(mhp_mod, aes(Price))+
+  geom_histogram(bins = 50,color = "white", fill = "Green")+
+  scale_x_continuous(breaks = c(1000000,2000000,3000000,4000000),
+                     labels = c("$1M","$2M","$3M","$4M"))+
+  ggtitle("House Price Distribution in Melbourne")+theme_bw()
+```
+
+
+The target variable is heavily **right skewed** implying that the mean of the housing prices > median price. Mean of Melbourne housing price is **$1,050,172 (Australian Dollars).**
+
+
+
+
+#Real-world organizational/business application:
+
+**Melbourne is currently experiencing a housing bubble (some experts say it may burst soon). According to Deloitte Access Economics' latest business outlook, housing prices are falling by over $1000/week. This is mostly because banks are raising their interest rates, less FDI on real estate in Melbourne, and banks have become more cautious with giving away loans (Wood, ABC News Breakfast, 2018).**
+
+
+
+
+
+
+#Modelling
+
+
+##Modelling 1: XGBoost
+
+XGBoost is an implementation of gradient boosted decision trees designed for speed and performance.
+XGBoost stands for eXtreme Gradient Boosting. It dominates structured or tabular datasets on classification and regression predictive modeling problems.
+
+Splitting the dataset into training and testing in 7:3 ratio
+Running XGBoost
+```{r}
+transformdata<- as.data.frame(mhp_mod[,c(1:5,7:16,19)])
+
+features <- colnames(transformdata)
+
+for (f in features) {
+  if ((class(transformdata[[f]])=="factor") || (class(transformdata[[f]])=="character")) {
+    levels <- unique(transformdata[[f]])
+    transformdata[[f]] <- as.numeric(factor(transformdata[[f]], levels=levels))
+  }
+}
+
+train_size_xg = floor(0.7*nrow(transformdata))
+test_size_xg = floor(0.3*nrow(transformdata))
+
+set.seed(6093)   # set seed to ensure you always have same random numbers generated
+train_ind_xg = sample(seq_len(nrow(transformdata)),size = train_size_xg)
+test_ind_xg = sample(seq_len(nrow(transformdata)),size = test_size_xg)
+
+training_xg<- transformdata[train_ind_xg,]
+testing_xg<- transformdata[test_ind_xg,]
+
+
+fitControl <- trainControl(method="none")
+xgbGrid <- expand.grid(nrounds = 500,
+                       max_depth = 3,
+                       eta = .05,
+                       gamma = 0,
+                       colsample_bytree = .8,
+                       min_child_weight = 1,
+                       subsample = 1)
+
+
+set.seed(4461)
+start_time_xg <- Sys.time()
+xg_melXGB = train(Price ~. , data = transformdata,
+                   method = "xgbTree",trControl = fitControl,
+                   tuneGrid = xgbGrid,na.action = na.pass,metric="RMSE")
+end_time_xg <- Sys.time()
+diff_xg<- end_time_xg-start_time_xg
+```
+
+
+Determining rank variable based on relative importance of the variables
+```{r}
+importance = varImp(xg_melXGB)
+varImportance <- data.frame(Variables = row.names(importance[[1]]), 
+                            Importance = round(importance[[1]]$Overall,2))
+
+rankImportance <- varImportance %>%
+  mutate(Rank = paste0(dense_rank(desc(Importance))))
+
+rankImportancefull = rankImportance
+
+ggplot(rankImportance, aes(x = reorder(Variables, Importance), 
+                           y = Importance)) +
+  geom_bar(stat='identity',colour="white", fill = "Red") +
+  geom_text(aes(x = Variables, y = 1, label = Rank),
+            hjust=0, vjust=.5, size = 4, colour = 'black',
+            fontface = 'bold') +
+  labs(x = 'Variables', title = 'Relative Variable Importance') +
+  coord_flip() + 
+  theme_bw()
+```
+
+As can be seen from the plot through feature engineering with XGBoost, **Rooms** were ranked the highest, while **type and method** the lowest.
+
+
+Metropolitan region is one of the predominant factors determining the housing price distribution in Melbourne.
+```{r}
+Reg_type<- sqldf("select Metropolitan_Region,COUNT(*) AS 'Totals' FROM mhp_mod GROUP BY Metropolitan_Region ORDER BY Totals DESC LIMIT 5")
+pie3D(Reg_type$Totals,labels=Reg_type$Metropolitan_Region,main="Region-wise spread of houses")
+head(Reg_type)
+```
+
+
+Suburbs are ranked the 7th most important feature. The map shows the top 20 suburbs where the average housing price is the most
+```{r}
+suburbData = mhp_mod %>% group_by(Suburb) %>% 
+  summarise(AvgPricePerSuburb = round(median(Price),0)) %>%
+  arrange(desc(AvgPricePerSuburb))
+suburbData$AvgPriceSuburb = scales::dollar(suburbData$AvgPricePerSuburb)
+suburbData = suburbData[0:19,]
+suburbData$AvgPricePerSuburb2 = scales::dollar(suburbData$AvgPricePerSuburb)
+
+Suburbs = c(head(as.character(suburbData$Suburb),20))
+
+SuburbsTop = mhp_df %>% filter(Suburb %in% Suburbs)
+center_lon = median(SuburbsTop$Longitude)
+center_lat = median(SuburbsTop$Lattitude)
+
+leaflet(SuburbsTop) %>% addTiles() %>%
+  addCircles(lng = ~Longitude, lat = ~Lattitude,radius = 3,
+             color = c("red"))  %>% setView(lng=center_lon, lat=center_lat, zoom=12)
+```
+
+
+
+
+
+##Modelling 2 : Association Rules
+
+"Association rules or a-rules are if/then statements for discovering interesting relationships between seemingly unrelated data in a large databases or other information repository."
+
+I have used a-rules as a supervised learning purpose by forcing the target classification attribute on the RHS.
+
+Selected numerical continuous and discrete variable that can be discretised to categorical ordinal
+```{r}
+ar_mel_df<- data.frame(mhp_mod[,c(2,7,9:13,16,19)]) 
+summary(ar_mel_df)
+str(ar_mel_df)
+```
+
+Discretisation with equal splits
+```{r}
+ar_mel_df[[ "Rooms"]] <- ordered(cut(ar_mel_df[[ "Rooms"]], c(0,2,4,16)),labels = c("1/2 BHK", "3/4 BHK", ">4 BHK"))
+ar_mel_df[["Bathrooms"]] <- ordered(cut(ar_mel_df[["Bathrooms"]],c(-1,1,2,9)),labels = c("0/1 bathroom","2 bathrooms",">2 bathrooms"))
+ar_mel_df[["Carspots"]] <- ordered(cut(ar_mel_df[["Carspots"]],c(-1,1,2,18)),labels = c("0/1 carspot","2 carspots",">2 carspots"))
+ar_mel_df[["Landsize"]] <- ordered(cut(ar_mel_df[["Landsize"]],c(-1,410,630,433014)),labels = c("small-sized","mid-sized","large-sized"))
+ar_mel_df[["Building_Area"]] <- ordered(cut(ar_mel_df[["Building_Area"]],c(-1,125,165,44515)),labels = c("small","medium","large"))
+ar_mel_df[["Year_Built"]] <- ordered(cut(ar_mel_df[["Year_Built"]],c(1195,1950,2000,2018)),labels = c("early 90s","late 90s","recent"))
+ar_mel_df[["Price"]] <- ordered(cut(ar_mel_df[["Price"]],c(0,1050172,11300000)),labels = c("LOW","HIGH"))
+
+#Converting distance to numeric (in miles)
+ar_mel_df$Distance<- as.numeric(trimws(ar_mel_df$Distance))
+ar_mel_df$Distance[[23052]]<-13.1
+
+#Converting Property Count to numeric
+ar_mel_df$Property_Count<- as.numeric(levels(ar_mel_df$Property_Count))[ar_mel_df$Property_Count]
+ar_mel_df$Property_Count[[14441]]<-7570
+ar_mel_df$Property_Count[[21055]]<-8920
+ar_mel_df$Property_Count[[23052]]<-5070
+
+#Discretising Distance & Property_Count
+summary(ar_mel_df$Distance)
+summary(ar_mel_df$Property_Count)
+
+ar_mel_df[["Distance"]] <- ordered(cut(ar_mel_df[["Distance"]],c(-1,5.30,7.80,100)),labels = c("Near","Not too far","Very far"))
+ar_mel_df[["Property_Count"]] <- ordered(cut(ar_mel_df[["Property_Count"]],c(82,5900,9000,21660)),labels = c("Few","Moderate","Many"))
+
+str(ar_mel_df)
+sum(!complete.cases(ar_mel_df))
+```
+
+
+Merging other categorical variables to run apriori
+```{r}
+melb_cat<- cbind.data.frame(mhp_df[,1],ar_mel_df$Rooms,mhp_df[,c(3:5)],ar_mel_df[,c(2:7)],mhp_df[,c(8,15)],ar_mel_df[,c(8,9)])
+colnames(melb_cat)<-c("Suburb","Rooms","Type","Method","Agent","Distance","Bathrooms","Carspots","Landsize","Building_Area","Year_Built","Postal_Code","Metropolitan_Region","Property_Count","Price")
+
+```
+
+
+Default setting
+```{r}
+rules_def <- apriori(melb_cat)
+rd<- sort(rules_def,by="lift",decreasing = T)                     
+plot(rules_def, measure = c("support", "confidence"), shading = "lift")
+plot(rules_def, method="paracoord", control=list(reorder=TRUE))
+```
+
+*Minimum support = 0.1*
+
+
+
+Fine tuning the model by forcing classification variable "Price=High" on RHS
+```{r}
+rules_fine_H <- apriori(data = melb_cat, parameter = list(supp = 0.105, conf = 0.56, minlen = 1),appearance = list(default = "lhs",rhs = c("Price=HIGH")),control = list(verbose = F))
+plot(rules_fine_H, measure = c("support", "confidence"), shading = "lift")
+rd_H<- sort(rules_fine_H,by="lift",decreasing = T)
+#5 most interesting rules with highest lift value
+inspect(head(rd_H,5))
+```
+
+
+Interpretation: 
+
+*With a lift value above 1.5, if the property is house/villa built in the early 1990's having 3/4 rooms and 2 carspots being in the Southern Metropolitan region, then the Price is likley to be High.*
+
+
+Fine tuning the model by forcing classification variable "Price=Low"" on RHS
+```{r}
+rules_fine_L <- apriori(data = melb_cat, parameter = list(supp = 0.15, conf = 0.85, minlen = 1),appearance = list(default = "lhs",rhs = c("Price=LOW")),control = list(verbose = F))
+plot(rules_fine_L, measure = c("support", "confidence"), shading = "lift")
+rd_L<- sort(rules_fine_L,by="lift",decreasing = T)
+#5 most interesting rules with highest lift value
+inspect(head(rd_L,5))
+```
+
+Interpretation: 
+
+*With a lift value above 1.4, if the property was built in the late 1990's having a 1/2bhk with 0/1 bathroom and 0/1 carspot, around a small land size and building area, then the Price is likely to be Low.*
+
+
+
+
+
+##Modelling 3 : Random Forest
+
+Random Forest is a flexible, easy to use supervised machine learning algorithm that produces, even without hyper-parameter tuning, a great result most of the time. It is also one of the most used algorithms, because of it's simplicity and the fact that it can be used for both classification and regression tasks.It automatically measures relative importance of each feature used for prediction.
+
+Running rf for classification on categorical variables as was used in a-rules
+```{r}
+dt_rf_df<- melb_cat[,c(2:4,6:11,13:15)]
+```
+
+Splitting the dataset into training and testing with 70% and 30%
+```{r}
+train_size_dt_rf = floor(0.7*nrow(dt_rf_df))
+test_size_dt_rf = floor(0.3*nrow(dt_rf_df))
+
+set.seed(3491)   # set seed to ensure you always have same random numbers generated
+train_ind_dt_rf = sample(seq_len(nrow(dt_rf_df)),size = train_size_dt_rf)
+test_ind_dt_rf = sample(seq_len(nrow(dt_rf_df)),size = test_size_dt_rf)
+
+training_dt_rf<- dt_rf_df[train_ind_dt_rf,]
+testing_dt_rf<- dt_rf_df[test_ind_dt_rf,]
+
+
+```
+
+
+
+Training the model and tuning using parameters:
+
+*mtryStart*	starting value of mtry
+
+*ntreeTry*	number of trees used at the tuning step
+
+*stepFactor*	at each iteration, mtry is inflated (or deflated) by this value
+
+*improve*	the (relative) improvement in OOB error must be by this much for the search to continue
+
+```{r}
+set.seed(9373)
+start_time_rf <- Sys.time()
+fit.rf <- randomForest(formula = Price ~ ., data = training_dt_rf, mtryStart = sqrt(ncol(dt_rf_df)), ntreeTry=50, stepFactor=2, improve=0.05)
+end_time_rf <- Sys.time()
+diff_rf<- end_time_rf-start_time_rf
+
+```
+
+
+
+
+##Modelling 4 : Decision Tree
+
+A decision tree is a decision support tool that uses a tree-like model of decisions and their possible consequences, including chance event outcomes, resource costs, and utility. It is one way to display an algorithm that only contains conditional control statements.
+
+Splitting the dataset into 70% for training and 30% for testing
+```{r}
+dec_df<-mhp_mod[,c(2,7,9:13,16,19)]
+str(dec_df)
+dec_df$Distance<- as.numeric(as.factor(as.integer(dec_df$Distance)))
+dec_df$Property_Count<- as.numeric(as.factor(as.integer(dec_df$Property_Count)))
+dec_df[["Price"]] <- ordered(cut(dec_df[["Price"]],c(0,1050172,11300000)),labels = c("Low","High"))
+str(dec_df)
+
+train_size_dec_df = floor(0.7*nrow(dec_df))
+test_size_dec_df = floor(0.3*nrow(dec_df))
+
+set.seed(2833)   # set seed to ensure you always have same random numbers generated
+train_ind_dec_df = sample(seq_len(nrow(dec_df)),size = train_size_dec_df)
+test_ind_dec_df = sample(seq_len(nrow(dec_df)),size = test_size_dec_df)
+
+training_dec_df<- dec_df[train_ind_dec_df,]
+testing_dec_df<- dec_df[test_ind_dec_df,]
+```
+
+
+Default settings
+```{r}
+set.seed(9351)
+start_time_dt1 <- Sys.time()
+mod1<- rpart(Price~.,training_dec_df,method = "class")
+end_time_dt1 <- Sys.time()
+diff_dt1<- end_time_dt1-start_time_dt1
+
+rpart.plot(mod1, type=1, extra = 100)
+mod1
+```
+
+
+Considering only rooms, distance and property count as they are the most frequent itemsets that is used to classify Price
+
+
+
+**Parameters:**
+
+*Min Split*: The minimum number of values in a node that must exist before a split is attempted. In other words, if the node has two members and the minimum split is set to 5, the node will become
+terminal, that is, no split will be attempted.
+
+*Max Depth*: Controls the maximum depth of the tree that will be created. It can also be described as the length of the longest path from the tree root to a leaf. The root node is considered to have a depth of 0. The Max Depth value cannot exceed 30 on a 32-bit machine.
+
+*Min Bucket*: The minimum number of entities allowed in any leaf of the tree. The default number is one-third of the value specified for Min Split.
+
+
+Building tuned model by bootstrapping with a tested cp value range of 0-0.001
+```{r}
+training_dec_df2<- training_dec_df[,c(1,2,8,9)]
+testing_dec_df2<- testing_dec_df[,c(1,2,8,9)]
+
+
+set.seed(4793)
+start_time_dt2 <- Sys.time()
+tuned_mod<- train(Price ~ ., training_dec_df2
+                  , method = 'rpart'
+                  , metric = 'Accuracy'
+                  , tuneLength = 100
+                  , tuneGrid = expand.grid(cp = seq(0,0.001,0.0001))
+                  , control = rpart.control(maxdepth = 4, minsplit = 2, minbucket = 2)
+                  ,trControl = trainControl(method = 'boot', number = 50))
+end_time_dt2 <- Sys.time()
+diff_dt2<- end_time_dt2-start_time_dt2
+
+plot(tuned_mod)
+```
+
+'cp' value of *0.0007* gave the highest accuracy for this model
+
+Visualising the decision tree model
+```{r}
+fancyRpartPlot(tuned_mod$finalModel, main="Decision Tree", cex=0.8, tweak=0.7)
+```
+
+Interpretations:
+
+*1. When the distance is just above 13kms from CBD, there is a 72% chance of housing price being low, for 2.5<rooms<3.5*
+
+*2. When the distance is just above 213 kms from CBD, there is an 84% chance of housing price being high for 2.5<rooms<3.5*
+
+
+
+##Modelling 5 : Naive Bayes (NB)
+
+This is a supervised learning method for classification on categorical variables/features. It is based on Bayes Theorem by calculating posterior probability for each class and the class with highest posterior probability is outcome of prediction.
+P(Y|X)=(P(X|Y)xP(Y))/P(X) {independent assumption}
+
+
+Running the model on default parameters
+```{r}
+set.seed(1112)
+start_time_nb <- Sys.time()
+def_nb <- naiveBayes(Price ~ ., data=training_dt_rf, usekernel = T)
+end_time_nb <- Sys.time()
+diff_nb<- end_time_nb-start_time_nb
+```
+
+Fine tuning the model (Cross-validation: 10 fold, 3 repetition)
+```{r}
+set.seed(1172)
+start_time_tnb <- Sys.time()
+def_tnb<- train(Price ~ ., data=training_dt_rf,method = "nb", tuneLength = 50,
+                trcontrol = trainControl(method = "cv", number = 10, repeats = 3),
+                tuneGrid = data.frame(fL = 1, usekernel = FALSE, adjust = 1))
+end_time_tnb <- Sys.time()
+diff_tnb<- end_time_tnb-start_time_tnb
+```
+
+
+
+
+##Modelling 6 : Logistic Regression
+
+Logistic regression is the appropriate regression analysis to conduct when the dependent variable is dichotomous (binary).  Like all regression analyses, the logistic regression is a predictive analysis. Logistic regression is used to describe data and to explain the relationship between one dependent binary variable and one or more nominal, ordinal, interval or ratio-level independent variables.
+
+```{r}
+lr_df<-mhp_mod[,c(2,7,9:13,16,19)]
+lr_df$Distance<- as.numeric(as.factor(as.integer(lr_df$Distance)))
+lr_df$Property_Count<- as.numeric(as.factor(as.integer(lr_df$Property_Count)))
+lr_df[["Price"]] <- ordered(cut(lr_df[["Price"]],c(0,1050172,11300000)),labels = c("0","1"))
+str(lr_df)
+#table(lr_df$Property_Count)
+set.seed(8038)
+start_time_glm <- Sys.time()
+def_glm <- glm(Price ~ .,family = binomial(link = "logit") ,data=lr_df)
+end_time_glm <- Sys.time()
+diff_glm<- end_time_glm-start_time_glm
+
+summary(def_glm)
+```
+
+**Regression equation:**
+
+*Logit(Price)= log(odds ratio) = 5.67+(2.82xRooms) +(0.18xDistance) + (2.26xBathrooms) + (3.52xCarspots) + (0.0042xLandsize) + (0.0041xBuilding_Area) - (0.17xYear_Built)*
+
+
+Interpretation of some of the co-efficients:
+
+*1. For every 1 unit increase in Year_Built, holding other variables constant, logit of probability of High Price is predicted to decrease by 0.17*
+
+*2. For every 1 unit increase in Rooms, holding other variables constant, logit of probability of High Price is predicted to increase by 2.82*
+
+*Landsize and Building area* are *not very good predictors* of Price as their *p-value>0.05*
+
+
+
+
+##Modelling 7 : Support Vector Machine (SVM)
+
+SVM works with both linear and non-linear data(logit/sigmoid function) by maximising the margins between the categories. It is used mainly for outliers, wherein the distance between data points and decision boundary indicates confidence of prediction. Kernels are used to project linearly unseparable data points into higher dimensional space so that a hyperplane could be found to separate different classes.
+
+Splitting the dataset into training and testing with 70% and 30%
+```{r}
+str(lr_df)
+train_size_lr_df = floor(0.7*nrow(lr_df))
+test_size_lr_df = floor(0.3*nrow(lr_df))
+
+set.seed(9327)   # set seed to ensure you always have same random numbers generated
+train_ind_lr_df = sample(seq_len(nrow(lr_df)),size = train_size_lr_df)
+test_ind_lr_df = sample(seq_len(nrow(lr_df)),size = test_size_lr_df)
+
+training_lr_df<- lr_df[train_ind_lr_df,]
+testing_lr_df<- lr_df[test_ind_lr_df,]
+```
+
+*C and Gamma* are the parameters for a nonlinear support vector machine (SVM) with a Gaussian radial basis function kernel.
+
+C is the parameter for the soft margin cost function, which controls the influence of each individual support vector; this process involves trading error penalty for stability.
+Gamma is the free parameter of the Gaussian radial basis function.
+
+Cost factor value range was chosen after running against different values ranging from 0.25 to 0.5
+
+Linear tuned SVM model with ensemble bootstrapping 5 times
+```{r}
+set.seed(2727)
+start_time_lsvm <- Sys.time()
+svm_linear <- train(Price ~ ., data = training_lr_df,
+                          method = "svmLinear",
+                          preProcess = c("center", "scale"),
+                          trControl = trainControl(method = "boot", number = 5),
+                          tuneGrid = expand.grid(C = seq(0.25,0.5,0.05)))
+end_time_lsvm <- Sys.time()
+diff_lsvm<- end_time_lsvm-start_time_lsvm
+plot(svm_linear)
+```
+
+
+Model
+```{r}
+svm_linear
+```
+
+Cost function was found to have a high accuracy in range of *0.25-0.45*. This was applied with parameter gamma (RBF) *0.4-0.7* that controls the tradeoff between error due to bias and variance. The gamma value was decided after repeated iterations with tuneGrid until a model with high accuracy was obtained.
+
+Non-linear(Radial) tuned SVM model with ensemble bootstrapping 5 times
+```{r}
+set.seed(3311)
+start_time_rsvm <- Sys.time()
+svm_radial <- train(Price ~ ., data = training_lr_df,
+                          method = "svmRadial",
+                          preProcess = c("center", "scale"),
+                          trControl = trainControl(method = "boot", number = 5),
+                          tuneGrid = expand.grid(C = 0.3 ,sigma=seq(0.4,0.7,0.1)))
+end_time_rsvm <- Sys.time()
+diff_rsvm<- end_time_rsvm-start_time_rsvm
+plot(svm_radial)
+```
+
+Model
+```{r}
+svm_radial
+```
+
+
+
+
+##Modelling 8 : Linear Regression
+
+Multiple linear regression attempts to model the relationship between two or more explanatory variables and a response variable by fitting a linear equation to observed data. Every value of the independent variable x is associated with a value of the dependent variable y.
+```{r}
+lm_data<-cor_data[,-c(2)]
+```
+
+Determining the most parsimonious model based on lowest AIC value through backward elimination
+```{r}
+model_al2 <- lm(formula = Price~. ,data=lm_data)
+step(model_al2, data=lm_data, direction = "backward")
+```
+
+Based on the linear model, predictors which influence the price (based on lowest AIC value of 718903.1) were found to be :
+Rooms, Distance, Bathrooms, Carspots, Year Built, Property Count
+Step:  AIC=718903.1
+Price ~ Rooms + Distance + Bathrooms + Carspots + Year_Built + 
+    Property_Count
+    
+    
+Running a regression on this model;
+```{r}
+model_lowAIC <- lm(formula = Price~Rooms + Distance + Bathrooms + Carspots + Year_Built + 
+    Property_Count ,data=lm_data)
+summary(model_lowAIC)
+adjR2<- round(summary(model_lowAIC)$adj.r.squared*100,4)
+
+```
+
+**Regression equation:**
+
+*Price = 6242813 + (202019xRooms) + (1272xDistance) + (239666xBathrooms) + (28696xCarspots) - (3241xYear_Built) + (93xProperty_Count)*
+
+
+
+Interpretation of some of the co-efficients:
+
+*1. Keeping every other variable constant, every single unit increase in Number of Rooms, increases the House Price by $202,019.*
+
+*2. Keeping every other variable constant, every single unit increase in Number of Bathrooms, increases the House Price by $239,666.*
+
+*3. Keeping every other variable constant, with every additional year, House Price decreases by $3241.*
+
+
+
+#Validation
+```{r}
+#RF
+pred.rf <- predict(fit.rf, testing_dt_rf)
+confusionMatrix(pred.rf,testing_dt_rf$Price)
+accuracy.meas(testing_dt_rf$Price,pred.rf)
+auc_rf<-roc.curve(testing_dt_rf$Price,pred.rf,plotit=F)
+print(paste0("AUC-ROC of RF(tuned) model= ",round(auc_rf$auc,4)))
+
+
+#Decision Tree default
+test_mod<- predict(mod1,testing_dec_df,type = "class")
+confusionMatrix(test_mod,testing_dec_df$Price)
+auc_dt1<-auc(multiclass.roc(as.numeric(testing_dec_df$Price), as.numeric(test_mod)))
+print(paste("AUC-ROC of Decision Tree model= ",round(auc_dt1,4)))
+print(paste0("Time taken to run Decision Tree model(default settings): ",round(diff_dt1,2)," seconds"))
+
+
+#Tuned Decision Tree
+test_tuned_mod<- predict(tuned_mod,testing_dec_df2)
+confusionMatrix(test_tuned_mod,testing_dec_df2$Price)
+auc_dt2<-auc(multiclass.roc(as.numeric(testing_dec_df2$Price), as.numeric(test_tuned_mod)))
+print(paste("AUC-ROC of Decision Tree model= ",round(auc_dt2,4)))
+print(paste0("Time taken to run Decision Tree model(default settings): ",round(diff_dt2,2)," seconds"))
+
+
+
+#NB
+pred_def_nb <- predict(def_nb, testing_dt_rf, type='class')
+confusionMatrix(pred_def_nb,testing_dt_rf$Price)
+accuracy.meas(testing_dt_rf$Price,pred_def_nb)
+auc_nb<-roc.curve(testing_dt_rf$Price,pred_def_nb,plotit=F)
+print(paste0("AUC-ROC of NB model= ",round(auc_nb$auc,4)))
+print(paste0("Time taken to run Naive Bayes: ",round(diff_nb,2)," seconds"))
+
+
+#Linear SVM
+pred_def_lsvm <- predict(svm_linear, testing_lr_df, type='raw')
+confusionMatrix(pred_def_lsvm,testing_lr_df$Price)
+auc_lsvm<- auc(multiclass.roc(as.numeric(testing_lr_df$Price), as.numeric(pred_def_lsvm)))
+print(paste("AUC-ROC of tuned Radial SVM model= ",round(auc_lsvm,4)))
+print(paste0("Time taken to run Linear SVM: ",round(diff_lsvm,2)," minutes"))
+
+
+#Radial SVM
+pred_def_rsvm <- predict(svm_radial, testing_lr_df, type='raw')
+confusionMatrix(pred_def_rsvm,testing_lr_df$Price)
+auc_rsvm<- auc(multiclass.roc(as.numeric(testing_lr_df$Price), as.numeric(pred_def_rsvm)))
+print(paste("AUC-ROC of tuned Radial SVM model= ",round(auc_rsvm,4)))
+print(paste0("Time taken to run Radial SVM: ",round(diff_rsvm,2)," minutes"))
+
+
+#Linear Regression
+print(paste0("Model fit is determined by adjusted R^2 value for the most parsimonious model using linear regression, which is : ", adjR2 , " %"))
+
+
+#Logistic Regression
+ll.null<- def_glm$null.deviance/-2
+ll.proposed<- def_glm$deviance/-2
+mf_psr2<- round((ll.null-ll.proposed)/ll.null,4)*100
+print(paste0("Model fit is determined by McFadden's Pseudo R^2 value for the logistic regression model, which is : ", mf_psr2 , " %"))
+```
+
+
+Creating a dataframe to output the results
+```{r}
+r1<- c(3,4,5,6,7,7,8)
+r2<- c("Random Forest","Decision Tree","Naive Bayes","Logistic Regression","Linear SVM","Radial SVM","Linear Regression")
+r3<- c("86.43%","75.26%","76.17%","-","72.53%","75.71%","-")
+r4<- c(0.70,0.45,0.48,0,0.37,0.45,0)
+r5<- c("-","-","-","16.78%","-","-","29.77%")
+r6<- c(round(auc_rf$auc,4),round(auc_dt2,4),round(auc_nb$auc,4),"-",round(auc_lsvm,4),round(auc_rsvm,4),"-")
+r7<- c(round(diff_rf,2),round(diff_dt2,2),round(diff_nb,2),5.2,round(diff_lsvm,2),round(diff_rsvm,2),3.5)
+results<- data.frame(r1,r2,r3,r4,r5,r6,r7)
+colnames(results)<- c("Model Number","Model","Accuracy","Kappa","Adjusted R2","AUC-ROC","Processing Time(seconds)")
+#View(results)
+```
+
+*Note: The numbers are subject to change due to random sampling. However, the process followed and end results are the same across all samples.*
+
+
+#Final Words
+
+**1. The good predictors of price are 'rooms', 'distance from Central Business District(CBD) of Melbourne (kms)', and 'property count'.**
+
+**2. Houses with low prices were built in the early 1990s and are near the CBD.**
+
+**3. The average cost of a room in a property is around $200,000.**
+
+**4. With every year, housing price decreases by around $3000 on an average.**
+
+**5. When the distance from CBD is just above 13kms, there is a 72% chance of housing price being low, for 2,3,4 bhk properties.**
+
+
+
+After running the 6 modelling techniques, the results are displayed in the table below: 
+```{r, echo= F, results='asis'}
+kable(results, caption = 'Model Performance', align=rep('c', 5))
+```
+
+
+**Random Forest** had the highest accuracy with **~86%** and with an AUC-ROC value of **~0.84** and ran within a reasonable processing time of **~20 seconds**.
+
+
+
+
+##Link to Shiny
+
+Association rules (Price=HIGH) : https://tusharmundodu.shinyapps.io/a_rules/
+
+
+
+
+
+#Benefiters from these analysis:
+
+**1. Potential property buyers based on current and previous market conditions in Melbourne.**
+
+**2. Landlords looking to lease or sell their property through agents.**
+
+**3. Real estate and corporate buyers looking to acquire land based on location.**
+
+**4. Australian National Government could avoid a housing market crash by keeping tabs on the dynamic housing market condition in Melbourne.**
+
+**5. Banks, educational institutions, advertisers, etc. can leverage these results.**
+
+
+
+
+
+
+#References:
+
+*Analytics Vidhya Content Team.* (2016). Tutorial on 5 Powerful R Packages used for imputing missing values. Retrieved from https://www.analyticsvidhya.com/blog/2016/03/tutorial-powerful-packages-imputing-missing-values/
+
+*Stack Overflow.* (2017). R - Getting Imputed Missing Values back into dataframe. Retrieved from https://stackoverflow.com/questions/42014442/r-getting-imputed-missing-values-back-into-dataframe
+
+
+*STHDA.* (N.D.). Correlation matrix : A quick start guide to analyze, format and visualize a correlation matrix using R software. Retrieved from http://www.sthda.com/english/wiki/correlation-matrix-a-quick-start-guide-to-analyze-format-and-visualize-a-correlation-matrix-using-r-software
+
+*Stack Overflow.* (2016). R error with inspect function. Retrieved from https://stackoverflow.com/questions/18934098/r-error-with-inspect-function
+
+*STHDA.* (N.D.). Text mining and word cloud fundamentals in R : 5 simple steps you should know .Retrieved from http://www.sthda.com/english/wiki/text-mining-and-word-cloud-fundamentals-in-r-5-simple-steps-you-should-know
+
+
+AjayL1. (2015). *Kaggle kernel.* Can we predict voting outcomes? Retrieved from https://www.kaggle.com/c/can-we-predict-voting-outcomes/discussion/21275
+
+
+Bukun. (2016). *Kaggle kernel.* Exploratory Data Analysis Melbourne Housing Market. Retrieved from https://www.kaggle.com/ambarish/eda-melbourne-xgboost-with-leaflets/code
+
+
+AlfredWu. (2016) *Kaggle kernel.* Data Visualisation of Housing Market in Melbourne. Retrieved from https://www.kaggle.com/alfred1984/data-visualisation-of-housing-market-in-melbourne
+
+
+*R Documentation.* (N.D.). Tune randomForest for the optimal mtry parameter. Retrieved from http://ugrad.stat.ubc.ca/R/library/randomForest/html/tuneRF.html
