@@ -1,0 +1,2 @@
+# Melbourne-Housing-Market
+Melbourne is currently experiencing a housing bubble (some experts say it may burst soon). According to Deloitte Access Economics’ latest business outlook, housing prices are falling by over $1000/week. This is mostly because banks are raising their interest rates, less FDI on real estate in Melbourne, and banks have become more cautious with giving away loans (Wood, ABC News Breakfast, 2018).
